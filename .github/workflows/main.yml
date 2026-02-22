@@ -1,15 +1,6 @@
-name: Build Kernel
+name: Build OP6T Pentest Kernel
 on:
   workflow_dispatch:
-  schedule:
-    # 每周周六00:00运行. 时间设置参考： http://crontab.guru
-    - cron: "0 0 * * 6"
-  push:
-    branches:
-      - HEAD
-  pull_request:
-    branches:
-      - HEAD
 
 jobs:
   build:
@@ -21,7 +12,7 @@ jobs:
       CCACHE_HARDLINK: "true"
       KERNEL_DEFCONFIG: "Acai-Nethunter-V9_defconfig"
       KERNEL_CMDLINE: "ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- O=out"
-      KPM_PATCH_SOURCE: "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU_patch/refs/heads/main/kpm/patch_linux" # patch exec file source -> raw.githubusercontent.com/Test/Test/patch .
+      KPM_PATCH_SOURCE: "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU_patch/refs/heads/main/kpm/patch_linux"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -32,31 +23,61 @@ jobs:
       - name: Set up ccache
         uses: hendrikmuhs/ccache-action@v1.2
 
-      - name: Install dependencies
+      - name: Install Dependencies
         run: |
-          sudo apt-get update -y 
-          sudo apt install gcc-aarch64-linux-gnu -y
-          sudo apt install gcc-arm-linux-gnueabi -y
-          sudo apt install aria2 binutils make python3 libssl-dev build-essential bc  bison flex unzip libssl-dev ca-certificates xz-utils mkbootimg cpio device-tree-compiler git git-lfs -y
-          curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
-          aria2c -j$(nproc --all) $(curl -fsSL https://github.com/ZyCromerZ/Clang/raw/main/Clang-15-link.txt)
+          sudo apt-get update -y
+          sudo apt install gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi -y
+          sudo apt install aria2 binutils make python3 libssl-dev build-essential bc bison flex unzip ca-certificates xz-utils mkbootimg cpio device-tree-compiler git git-lfs -y
+
+      - name: Integrate SukiSU-Ultra + SusFS
+        run: |
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-main
+
+      - name: Download ZyCromerZ Clang
+        run: |
+          aria2c -j$(nproc --all) $(curl -fsSL https://github.com/ZyCromerZ/Clang/raw/main/Clang-10-link.txt)
           mkdir zyc-clang
-          tar -xzvf Clang-*.tar.gz -C zyc-clang >> /dev/null
+          tar -xzf Clang-*.tar.gz -C zyc-clang > /dev/null
+          rm -f Clang-*.tar.gz
+
+      - name: Download KPM Patcher
+        run: |
           aria2c -j$(nproc --all) $KPM_PATCH_SOURCE
           sudo install -m 755 patch_linux /usr/bin/kpmpatcher
           rm patch_linux
+
+      - name: Setup AnyKernel3
+        run: |
           git clone https://github.com/osm0sis/AnyKernel3
           sed -i 's/do.devicecheck=1/do.devicecheck=0/g' AnyKernel3/anykernel.sh
           sed -i 's!BLOCK=/dev/block/platform/omap/omap_hsmmc.0/by-name/boot;!BLOCK=auto;!g' AnyKernel3/anykernel.sh
           sed -i 's/IS_SLOT_DEVICE=0;/is_slot_device=auto;/g' AnyKernel3/anykernel.sh
           rm -rf AnyKernel3/.git* AnyKernel3/README.md
 
-      - name: GetTime
-        id: get_time
+      - name: Apply Pentest Stealth Hardening
         run: |
-          echo "TIME=$(TZ=UTC+3 date +%s )" >> $GITHUB_OUTPUT
+          cat >> arch/arm64/configs/$KERNEL_DEFCONFIG << 'STEALTH'
 
-      - name: Build Kernel-With-KernelSU
+          # --- KERNEX: Stealth & Anti-Detection ---
+          CONFIG_PRINTK_SAFE_LOG_BUF_SHIFT=12
+          # CONFIG_DEBUG_INFO is not set
+          CONFIG_RANDOMIZE_BASE=y
+          # CONFIG_KALLSYMS is not set
+          # CONFIG_KPROBE_EVENTS is not set
+          # --- Pentest Network Support ---
+          CONFIG_USB_CONFIGFS_F_HID=y
+          CONFIG_USB_G_HID=y
+          CONFIG_PACKET=y
+          CONFIG_PACKET_DIAG=y
+          CONFIG_TUN=y
+          CONFIG_NETFILTER_NETLINK_QUEUE=y
+          CONFIG_NETFILTER_XT_TARGET_NFQUEUE=y
+          CONFIG_BRIDGE=y
+          CONFIG_BRIDGE_NF_EBTABLES=y
+          STEALTH
+          echo "[+] Pentest stealth hardening applied"
+
+      - name: Build Kernel
         run: |
           export PATH=$(pwd)/zyc-clang/bin/:$PATH
           make $KERNEL_CMDLINE $KERNEL_DEFCONFIG CC="ccache clang"
@@ -65,19 +86,23 @@ jobs:
       - name: KPM Patcher
         run: |
           cd out/arch/arm64/boot
-          
           if [[ -f "Image" ]]; then
               kpmpatcher
               mv oImage Image
-              echo "Hook Image successfully !"
+              echo "[+] KPM hooks patched into Image"
           else
-              echo "No valid Image file found."
+              echo "[-] Build FAILED - no Image found"
               exit 1
           fi
           cp Image ../../../../AnyKernel3
 
-      - name: Upload Kernel-SU
+      - name: Get Time
+        id: get_time
+        run: |
+          echo "TIME=$(date +%Y%m%d-%H%M)" >> $GITHUB_OUTPUT
+
+      - name: Upload Pentest Kernel
         uses: actions/upload-artifact@v4
         with:
-          name: KSUN-${{ steps.get_time.outputs.TIME }}
+          name: OP6T-Pentest-SukiSU-${{ steps.get_time.outputs.TIME }}
           path: "AnyKernel3/*"
